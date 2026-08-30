@@ -1,0 +1,76 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Generate missing Android platform files
+        run: |
+          mkdir -p /tmp/scaffold
+          cd /tmp/scaffold
+          flutter create --platforms=android --org com.gobaas --project-name mybaas .
+          cp -rn /tmp/scaffold/android "$GITHUB_WORKSPACE/android"
+
+      - name: Add required Android permissions
+        run: |
+          MANIFEST="$GITHUB_WORKSPACE/android/app/src/main/AndroidManifest.xml"
+          # Location permissions (geolocator) - flutter create's default
+          # manifest does not include these, so every Geolocator call
+          # (checkPermission, getCurrentPosition, used by the "Search
+          # Baas Near Me" feature) fails immediately with a generic
+          # platform exception until they're declared here.
+          sed -i 's#<manifest xmlns:android="http://schemas.android.com/apk/res/android">#<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />#' "$MANIFEST"
+          cat "$MANIFEST"
+
+      - name: Wire up Firebase Cloud Messaging (push notifications)
+        run: |
+          # google-services.json lives at the repo root (added via the
+          # GitHub web UI) since android/ itself is scaffolded fresh
+          # every build and never committed - this copies it into the
+          # one place the Google Services Gradle plugin actually reads
+          # it from.
+          cp "$GITHUB_WORKSPACE/google-services.json" "$GITHUB_WORKSPACE/android/app/google-services.json"
+
+          SETTINGS="$GITHUB_WORKSPACE/android/settings.gradle"
+          APP_BUILD="$GITHUB_WORKSPACE/android/app/build.gradle"
+
+          # Registers the Google Services plugin at the project level -
+          # anchored on flutter-plugin-loader, which every flutter
+          # create scaffold includes verbatim, unlike version numbers
+          # elsewhere in this file that shift between Flutter releases.
+          sed -i 's#id "dev.flutter.flutter-plugin-loader" version "1.0.0"#id "dev.flutter.flutter-plugin-loader" version "1.0.0"\n    id "com.google.gms.google-services" version "4.4.2" apply false#' "$SETTINGS"
+
+          # Applies it to the app module - anchored on the Flutter
+          # Gradle plugin line for the same reason as above.
+          sed -i 's#id "dev.flutter.flutter-gradle-plugin"#id "dev.flutter.flutter-gradle-plugin"\n    id "com.google.gms.google-services"#' "$APP_BUILD"
+
+          cat "$SETTINGS"
+          cat "$APP_BUILD"
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build debug APK
+        run: flutter build apk --debug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: gobaas-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
